@@ -22,6 +22,7 @@ NONE = '目前沒有停班停課訊息'   # 平常沒颱風時，表上找不到
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state.json')
 TW = timezone(timedelta(hours=8))
 FAIL_ALERT = 6   # 連續 6 次（約 30 分鐘）抓不到才警告
+GAP_ALERT = 15   # 上一棒結束到這一棒開始超過 15 分鐘，就算中斷過
 
 
 def fetch(url=URL, raw=False):
@@ -121,6 +122,20 @@ def main():
             json.dump(state, f, ensure_ascii=False, indent=1)
 
 
+def gap(prev_end):
+    """每一棒開始時跑一次：跟上一棒結束時間（GitHub API 給的 UTC）比，斷太久就回報。"""
+    prev_end = prev_end.strip()
+    if not prev_end:
+        return
+    end = datetime.fromisoformat(prev_end.replace('Z', '+00:00')).astimezone(TW)
+    now = datetime.now(TW)
+    mins = int((now - end).total_seconds() // 60)
+    print(f'上一棒結束 {end:%m/%d %H:%M}，中斷 {mins} 分鐘')
+    if mins > GAP_ALERT:
+        send(f'⚠ 停班停課機器人剛剛中斷了 {mins} 分鐘（{end:%m/%d %H:%M}～{now:%H:%M}），現在已恢復。\n'
+             f'中斷期間如果臺北／新北狀態有變，下一則會馬上補上；沒收到就是沒變。')
+
+
 def dayoff(state):
     prev = state.get('status', {})
     fails = state.get('fails', 0)
@@ -203,4 +218,6 @@ def typhoon(state):
 
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--gap']:
+        sys.exit(gap(os.environ.get('PREV_END', '')))
     sys.exit(main())

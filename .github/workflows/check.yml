@@ -22,6 +22,14 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+      - name: 中斷回報
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+        run: |
+          PREV_END=$(gh run list -R "$GITHUB_REPOSITORY" -w check.yml -s completed -L 1 --json updatedAt --jq '.[0].updatedAt') \
+            python3 notify.py --gap || echo "中斷回報失敗，不影響檢查"
       - name: 每分鐘檢查
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
