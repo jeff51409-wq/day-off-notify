@@ -1,12 +1,16 @@
 name: 停班停課檢查
 
+# GitHub 的排程很不可靠（新專案甚至好幾小時都不觸發），所以改成「接力」：
+# 每一棒在裡面每分鐘檢查一次、跑約 5.5 小時，結束前自己觸發下一棒。
+# 排程只當備援：接力萬一斷掉，排程有跑到就會重新接上（concurrency 讓同時只有一棒在跑）。
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 每 5 分鐘（GitHub 尖峰時段可能晚幾分鐘）
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: check
@@ -15,19 +19,28 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      - run: python3 notify.py
+      - name: 每分鐘檢查
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-      - name: 存狀態
         run: |
-          if [ -n "$(git status --porcelain state.json)" ]; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
-            git add state.json
-            git commit -m "更新狀態"
-            git push
-          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          end=$(( $(date +%s) + 330*60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            timeout 120 python3 notify.py || echo "這輪失敗，下一輪再試"
+            if [ -n "$(git status --porcelain state.json)" ]; then
+              git add state.json
+              git commit -q -m "更新狀態"
+              git pull -q --rebase && git push -q || echo "存狀態失敗，下一輪再試"
+            fi
+            sleep 60
+          done
+      - name: 交棒
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run check.yml -R "$GITHUB_REPOSITORY" --ref main
