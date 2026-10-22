@@ -49,6 +49,29 @@ def parse(page):
     return updated, status
 
 
+def verdict(s):
+    """把官方原文翻成一句白話：放假／照常上班／還沒宣布。只看全市的那一行（以今天、明天開頭），區域性的另外提示。"""
+    if '尚未宣布' in s:
+        return '還沒宣布'
+    if s == NONE:
+        return '沒有停班停課'
+    whole = [l for l in s.split('\n') if re.match(r'(今天|明天|\d)', l)]
+    if not whole:
+        return '只有部分區域停班停課，看下面原文'
+    l = whole[0]
+    for key, word in (('停止上班', '放假'), ('照常上班', '照常上班')):
+        if key in l:
+            when = l.split(key)[0].rstrip('、，, ')
+            when = when[:-1] + '起' if when.endswith('起') else when
+            out = when + word
+            if word == '照常上班' and '停止上課' in l:
+                out += '（但學校停課）'
+            if len(whole) < len(s.split('\n')):
+                out += '；部分區域不同，看下面原文'
+            return out
+    return '看下面原文'
+
+
 def send(text):
     token, chat = os.environ.get('TG_TOKEN'), os.environ.get('TG_CHAT')
     if not token or not chat:
@@ -91,6 +114,8 @@ def main():
         changed = [c for c in CITIES if status[c] != prev.get(c)]
         if changed:
             lines = [f'🌀 停班停課更新（官方 {updated}）', '']
+            lines += [f'👉 {c}：{verdict(status[c])}' for c in CITIES]
+            lines += ['', '── 官方原文 ──']
             for c in CITIES:
                 if c in changed:
                     lines.append(f'▶ {c}：{status[c]}')
