@@ -1,0 +1,33 @@
+name: 停班停課檢查
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # 每 5 分鐘（GitHub 尖峰時段可能晚幾分鐘）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 notify.py
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+      - name: 存狀態
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add state.json
+            git commit -m "更新狀態"
+            git push
+          fi
