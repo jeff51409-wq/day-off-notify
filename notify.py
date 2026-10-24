@@ -1,6 +1,6 @@
 """
-盯人事行政總處的停班停課表，指定縣市的狀態一變就推到 Telegram。
-GitHub Actions 每 5 分鐘跑一次；上次的狀態存在 state.json（有變才 commit）。
+盯人事行政總處的停班停課表，臺北／新北「某一天放不放假」的結論一變就推到 Telegram；颱風警報只報發布／等級變更／解除。
+GitHub Actions 接力每分鐘跑一次；上次的狀態存在 state.json（有變才 commit）。
 
 環境變數：TG_TOKEN（機器人代碼）、TG_CHAT（聊天室 ID）。沒設就只印出來（本機測試用）。
 """
@@ -52,27 +52,80 @@ def parse(page):
     return updated, status
 
 
-def verdict(s):
-    """把官方原文翻成一句白話：放假／照常上班／還沒宣布。只看全市的那一行（以今天、明天開頭），區域性的另外提示。"""
-    if '尚未宣布' in s:
-        return '還沒宣布'
+WEEK = '一二三四五六日'
+
+
+def day_lines(updated, s):
+    """把官方原文拆成「哪一天 → 白話」：{'2026-10-24': '放假', ...}，另回傳有沒有區域性的行。
+    今天／明天 換成實際日期，這樣半夜官網把「明天放假」改寫成「今天放假」不會被當成新消息。"""
+    base = datetime.strptime(updated[:10], '%Y/%m/%d').date() if updated else datetime.now(TW).date()
+    days, partial = {}, False
     if s == NONE:
-        return '沒有停班停課'
-    whole = [l for l in s.split('\n') if re.match(r'(今天|明天|\d)', l)]
-    if not whole:
-        return '只有部分區域停班停課，看下面原文'
-    l = whole[0]
-    for key, word in (('停止上班', '放假'), ('照常上班', '照常上班')):
-        if key in l:
-            when = l.split(key)[0].rstrip('、，, ')
-            when = when[:-1] + '起' if when.endswith('起') else when
-            out = when + word
-            if word == '照常上班' and '停止上課' in l:
-                out += '（但學校停課）'
-            if len(whole) < len(s.split('\n')):
-                out += '；部分區域不同，看下面原文'
-            return out
-    return '看下面原文'
+        return days, partial
+    for l in s.split('\n'):
+        m = re.match(r'(今天|明天|(\d+)月(\d+)日|(\d+)日)', l)
+        if not m:
+            partial = True
+            continue
+        if m.group(1) == '今天':
+            d = base
+        elif m.group(1) == '明天':
+            d = base + timedelta(days=1)
+        else:
+            mon = int(m.group(2) or base.month)
+            d = base.replace(month=mon, day=int(m.group(3) or m.group(4)))
+        rest = l[m.end():].lstrip('（(').split('）')[-1].split(')')[-1]
+        if '尚未宣布' in l:
+            word = '還沒宣布'
+        elif '停止上班' in l:
+            when = rest.split('停止上班')[0].replace('已達', '').rstrip('、，, ')
+            word = (when + '放假') if '起' in when else '放假'
+        elif '照常上班' in l:
+            word = '照常上班' + ('（但學校停課）' if '停止上課' in l else '')
+        elif '停止上課' in l:
+            word = '照常上班（只有學校停課）'
+        else:
+            word = l
+        days.setdefault(d.isoformat(), word)
+    return days, partial
+
+
+def day_label(iso, today):
+    d = datetime.strptime(iso, '%Y-%m-%d').date()
+    rel = {0: '今天', 1: '明天', 2: '後天'}.get((d - today).days, '')
+    return f'{rel} {d.month}/{d.day}（{WEEK[d.weekday()]}）'.strip()
+
+
+def report(prev, prev_updated, updated, status, today):
+    """決定要不要通知、傳什麼。回傳 (訊息, 靜音) 或 None。
+    只在「今天以後某一天的結論變了」才響；官網改寫措辭、半夜換日、隔天下午清掉當天公告都不吵你。"""
+    if prev_updated and updated and updated < prev_updated:
+        return None   # 官網不同主機回舊版（10/23 20:05→19:59→20:05 來回跳過），舊的不理
+    now_days = {c: day_lines(updated, status[c]) for c in CITIES}
+    old_days = {c: day_lines(prev_updated, prev.get(c, NONE)) for c in CITIES}
+    t = today.isoformat()
+    changed = False
+    for c in CITIES:
+        new, old = now_days[c][0], old_days[c][0]
+        for d in set(new) | set(old):
+            if new.get(d) != old.get(d) and (d > t or (d == t and d in new)):
+                changed = True
+    partial_changed = any(now_days[c][1] and status[c] != prev.get(c) for c in CITIES)
+    if not changed and not partial_changed:
+        return None
+
+    dates = sorted({d for c in CITIES for d in now_days[c][0] if d >= t}, reverse=True)
+    lines = [f'🌀 停班停課有新消息（官方 {updated[5:16]}）', '']
+    if not dates:
+        lines.append('臺北、新北目前都沒有停班停課')
+    for d in dates:
+        lines.append(f'📅 {day_label(d, today)}')
+        lines += [f'　{c}：{now_days[c][0].get(d, "沒有停班停課")}' for c in CITIES]
+    if any(now_days[c][1] for c in CITIES):
+        lines.append('⚠ 有部分區域不一樣，看下面原文')
+    lines += ['', '── 官方原文 ──']
+    lines += [f'{c}：{status[c]}' for c in CITIES]
+    return '\n'.join(lines + ['', SITE]), not changed
 
 
 def send(text, silent=False):
@@ -156,19 +209,10 @@ def dayoff(state):
         lines += [f'{c}：{status[c]}' for c in CITIES]
         send('\n'.join(lines + ['', f'官方更新時間 {updated}', SITE]))
     else:
-        changed = [c for c in CITIES if status[c] != prev.get(c)]
-        if changed:
-            lines = [f'🌀 停班停課更新（官方 {updated}）', '']
-            lines += [f'👉 {c}：{verdict(status[c])}' for c in CITIES]
-            lines += ['', '── 官方原文 ──']
-            for c in CITIES:
-                if c in changed:
-                    lines.append(f'▶ {c}：{status[c]}')
-                    lines.append(f'　（原本：{prev.get(c, "—")}）')
-                else:
-                    lines.append(f'{c}：{status[c]}')
-            send('\n'.join(lines + ['', SITE]))
-    if status != prev:
+        msg = report(prev, state.get('updated', ''), updated, status, datetime.now(TW).date())
+        if msg:
+            send(*msg)
+    if status != prev and not (state.get('updated') and updated < state['updated']):
         state['status'], state['updated'] = status, updated
     print(updated, status)
 
@@ -179,9 +223,20 @@ def js_str(src, key):
     return m.group(1).encode().decode('unicode_escape').encode('latin-1').decode('utf-8') if m else ''
 
 
+def pta_png():
+    """氣象署最新一張路徑潛勢圖；抓不到就算了。"""
+    d = fetch(CWA + '/Data/js/typhoon/TY_NEWS-Data.js?T=' + str(int(datetime.now().timestamp())))
+    m = re.search(r"TY_DataTime\s*=\s*'(\d+)'", d)
+    if not m:
+        return None
+    imgs = json.loads(fetch(f'{CWA}/Data/typhoon/TY_NEWS/PTA_IMGS_{m.group(1)}_zhtw.json'))
+    return fetch(f'{CWA}/Data/typhoon/TY_NEWS/{imgs["WHOLE"][-1]}', raw=True)
+
+
 def typhoon(state):
-    """有颱風警報時：每一報傳警報內容（等級變了才響），路徑預測更新時傳潛勢圖。"""
+    """颱風警報只在發布、等級變更、解除時傳一則（警報內容＋路徑圖合在一起）；每小時的例行報不傳。"""
     ty = state.setdefault('ty', {})
+    ty.pop('pta', None)
     w = fetch(CWA + '/Data/js/warn/Warning_Content.js?T=' + str(int(datetime.now().timestamp())))
     i = w.find("'TY_WARN':{")   # 前面的 WarnAll 清單也有 'TY_WARN'，要找物件本身
     block = w[i:w.find("'E'", i)] if i >= 0 else ''
@@ -190,31 +245,26 @@ def typhoon(state):
     now = datetime.now(TW).strftime('%Y/%m/%d %H:%M')
     active = bool(issued) and validto > now and '解除' not in title + content[:30]
 
-    if issued and issued != ty.get('issued') and (active or ty.get('active')):
-        level_changed = title != ty.get('title') or active != ty.get('active')
+    if issued and issued != ty.get('issued') and (title != ty.get('title') or active != ty.get('active')) \
+            and (active or ty.get('active')):
         if not active:
             head = '✅ 颱風警報解除'
-        elif level_changed:
-            head = f'🚨 {title}' + ('發布' if not ty.get('active') else '（等級變更）')
         else:
-            head = f'🌀 {title}（最新一報）'
-        send(f'{head}\n{issued} 發布\n\n{content}\n\n{CWA}/V8/C/P/Typhoon/TY_WARN.html', silent=not level_changed)
+            head = f'🚨 {title}' + ('發布' if not ty.get('active') else '（等級變更）')
+        text = f'{head}\n{issued} 發布\n\n{content}\n\n{CWA}/V8/C/P/Typhoon/TY_WARN.html'
+        png = None
+        if active:
+            try:
+                png = pta_png()
+            except Exception as e:
+                print('路徑圖失敗：', e)
+        if png and len(text) <= 1000:
+            send_photo(png, text)
+        else:
+            send(text)
+            if png:
+                send_photo(png, '🗺 最新路徑潛勢', silent=True)
     ty.update(issued=issued, title=title, active=active)
-
-    if not active:
-        return
-    d = fetch(CWA + '/Data/js/typhoon/TY_NEWS-Data.js?T=' + str(int(datetime.now().timestamp())))
-    m = re.search(r"TY_DataTime\s*=\s*'(\d+)'", d)
-    if not m or m.group(1) == ty.get('pta'):
-        return
-    t = m.group(1)
-    imgs = json.loads(fetch(f'{CWA}/Data/typhoon/TY_NEWS/PTA_IMGS_{t}_zhtw.json'))
-    png = fetch(f'{CWA}/Data/typhoon/TY_NEWS/{imgs["WHOLE"][-1]}', raw=True)
-    k = d.find("TY_LIST_1['C']")
-    desc = clean(re.sub(r"'\s*\+\s*'", '', d[k:d.find(';', k)]).replace('<br>', ' ').replace('</h4>', '\n').replace('</p>', '\n'))
-    desc = re.sub(r"^TY_LIST_1\['C'\]\s*=\s*'?", '', desc).rstrip("'")
-    send_photo(png, f'🗺 颱風路徑潛勢（{t[4:6]}/{t[6:8]} {t[8:10]}:{t[10:]} UTC）\n\n{desc}'[:1000], silent=bool(ty.get('pta')))
-    ty['pta'] = t
 
 
 if __name__ == '__main__':
