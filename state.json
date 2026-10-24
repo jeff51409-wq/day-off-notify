@@ -7,9 +7,9 @@
  "month": "2026-10",
  "fails": 0,
  "ty": {
-  "issued": "2026/10/24 17:30",
-  "title": "海上颱風警報",
-  "active": true,
+  "issued": "2026/10/24 20:30",
+  "title": "解除颱風警報",
+  "active": false,
   "pta": "202610240600"
  }
 }
