@@ -10,6 +10,7 @@ import os
 import re
 import ssl
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -136,6 +137,17 @@ def send(text, silent=False):
     data = urllib.parse.urlencode({'chat_id': chat, 'text': text, 'disable_web_page_preview': 'true',
                                    'disable_notification': str(silent).lower()}).encode()
     urllib.request.urlopen(f'https://api.telegram.org/bot{token}/sendMessage', data, timeout=30).read()
+
+
+def tg(method, **params):
+    """呼叫 Telegram API，回傳 result；沒設 token 就只印出、回傳假的 message_id。"""
+    token, chat = os.environ.get('TG_TOKEN'), os.environ.get('TG_CHAT')
+    if not token or not chat:
+        print(f'--- 沒設 TG_TOKEN／TG_CHAT，只印出 {method} ---\n' + params.get('text', ''))
+        return {'message_id': 0}
+    data = urllib.parse.urlencode({'chat_id': chat, **params}).encode()
+    with urllib.request.urlopen(f'https://api.telegram.org/bot{token}/{method}', data, timeout=30) as r:
+        return json.loads(r.read())['result']
 
 
 def send_photo(png, caption, silent=False):
@@ -265,6 +277,51 @@ def typhoon(state):
             if png:
                 send_photo(png, '🗺 最新路徑潛勢', silent=True)
     ty.update(issued=issued, title=title, active=active)
+    board(state, active, title, issued, content)
+
+
+def board(state, active, title, issued, content):
+    """颱風期間只留一則置頂「颱風看板」，每報直接改那一則，不產生新訊息；警報解除後收尾、取消置頂。"""
+    b = state.get('board')
+    if not active:
+        if b:
+            try:
+                tg('editMessageText', message_id=b['id'], text='📋 颱風看板\n\n✅ 颱風警報已解除，看板停止更新。')
+                tg('unpinChatMessage', message_id=b['id'])
+            except Exception as e:
+                print('看板收尾失敗：', e)
+            state.pop('board')
+        return
+    today = datetime.now(TW).date()
+    lines = ['📋 颱風看板（這則會自己更新，點開置頂就是最新）', '', f'🌀 {title}', f'{issued} 發布', content, '',
+             '🏢 停班停課']
+    days = {c: day_lines(state.get('updated', ''), state.get('status', {}).get(c, NONE))[0] for c in CITIES}
+    t = today.isoformat()
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    for d in sorted({d for c in CITIES for d in days[c] if d >= t} | {tomorrow}, reverse=True):
+        lines.append(f'📅 {day_label(d, today)}')
+        lines += [f'　{c}：{days[c].get(d, "還沒消息")}' for c in CITIES]
+    text = '\n'.join(lines)[:4000]
+    if b and b.get('text') == text:
+        return
+    if b:
+        try:
+            tg('editMessageText', message_id=b['id'], text=text, disable_web_page_preview='true')
+        except urllib.error.HTTPError as e:
+            err = e.read().decode('utf-8', 'replace')
+            if 'not found' not in err and "can't be edited" not in err:
+                print('看板更新失敗，下一輪再試：', err)
+                return
+            b = None   # 舊看板被刪掉了
+    if not b:   # 第一次、或舊看板沒了 → 重發一則並置頂
+        mid = tg('sendMessage', text=text, disable_notification='true', disable_web_page_preview='true')['message_id']
+        try:
+            tg('pinChatMessage', message_id=mid, disable_notification='true')
+        except Exception as e:
+            print('置頂失敗：', e)
+        b = {'id': mid}
+    b['text'] = text
+    state['board'] = b
 
 
 if __name__ == '__main__':
